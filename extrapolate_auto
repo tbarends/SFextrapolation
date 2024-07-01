@@ -1,0 +1,1042 @@
+#!/bin/csh -f
+# Script for extrapolation of structure factors
+# Version for Cryptochrome project
+# The script will first refine the input pdb file against the dark state data
+# to obtain phases
+# This will first be done in rigid-body mode and then in restrained
+# refinement mode, both using REFMAC5.
+# Then the script will scale the light- and dark data using SCALEIT
+# A python program will then perform Q-weighting if required, and 
+# write out mtz files with extrapolated map coefficients for a range 
+# of assumed occupancies. 
+# For the cryptochrome project, the "best" occupancy is set manually
+# The script also outputs sharpened maps, solvent flattened maps and
+# a Denth-correction-applied map, but these are experimental features. 
+######################################################################
+######################CHANGE PARAMETERS HERE##########################
+######################################################################
+## MAIN SETTINGS
+set spacegroup=P21
+set preset_occ=0.25
+set jobname=occ0.25_dm0.6
+set qweight=TRUE  
+## DARK INPUT
+set darkin=./phyA_dark_runs11to22_hits_reproc1_maxadu_partialator_2m_uab_2p2A-20240505-unique_truncate1.mtz
+set darkF=F
+set darkSIGF=SIGF
+## LIGHT INPUT
+set lightin=./phyA_LEDs_runs76to88_hits_reproc1_maxadu_partialator_2m_uab_2p2A-20240505-unique_truncate1.mtz
+set lightF=F
+set lightSIGF=SIGF
+## INPUT PDB FOR PHASES AND ATOM FOR OCCUPANCY DETERMINATION
+set atom_string="OB  CYC A 500"
+set pdb=./phyA_dark_runs11to22_hits_reproc1_partialator_2m_uab_2p2A-unique_refmac202...1031_2.pdb
+## RFREE SOURCE
+set rfree_source=./phyA_dark_runs11to22_hits_reproc1_partialator_2m_uab_2p2A-unique.mtz
+set RFREE=FreeR_flag
+## LIBRARY FOR REFINEMENT STEP
+set libin=./CYC.cif
+## RESOLUTION LIMITS
+set lowres=20.0
+set highres=2.2
+## OCCUPANCY RANGE TO TEST
+set occ_start=0.10
+set occ_end=0.50
+set occ_step=0.05
+set Bsharpen=20
+set solvent_content=0.6
+
+######################################################################
+#######################DO NOT CHANGE BELOW HERE#######################
+######################################################################
+##
+cat extrapolate_auto > ${jobname}.log
+
+
+## Get the unit cell
+mtzdump HKLIN ${darkin} >mtzdump.log <<eof_mtzdump
+go
+eof_mtzdump
+
+python2.7 <<eof_getcell
+import string
+infile=open('mtzdump.log','r')
+inlines=infile.readlines()
+infile.close()
+for n in range(len(inlines)):
+    myline=inlines[n]
+
+    if "* Space group =" in myline:
+    
+        elements=myline.split()
+        myelement=elements[4]
+        spg=myelement[1:-1]
+
+    if "* Cell Dimensions :" in myline:
+        print "found the cell line"
+        cellline=inlines[n+2]
+        elements=cellline.split()
+        cella=float(elements[0])
+        cellb=float(elements[1])
+        cellc=float(elements[2])
+        cellalpha=float(elements[3])
+        cellbeta=float(elements[4])
+        cellgamma=float(elements[5])
+
+
+spg="${spacegroup}"
+
+
+outfile=open('cells.sh','w')
+outfile.write('#!/bin/bash \n')
+outfile.write('echo I am including the cell parameters \n')
+outfile.write('set a=' + r'"' +str(cella) + r'"' + '\n')
+outfile.write('set b=' + r'"' +str(cellb) + r'"' + '\n')
+outfile.write('set c=' + r'"' +str(cellc) + r'"' + '\n')
+outfile.write('set alpha=' + r'"' +str(cellalpha) + r'"' + '\n')
+outfile.write('set beta=' + r'"' +str(cellbeta) + r'"' + '\n') 
+outfile.write('set gamma=' + r'"' +str(cellgamma) + r'"' + '\n')
+outfile.write('set spg=' + r'"' +spg + r'"' + '\n')
+outfile.write('# end of cell parameters\n')
+outfile.close()
+
+eof_getcell
+
+chmod u+x cells.sh
+source ./cells.sh
+
+
+echo 'I think the cell parameters and space group are:' >> ${jobname}.log
+echo $a $b $c $alpha $beta $gamma $spg >> ${jobname}.log
+echo '------------------------------------' >> ${jobname}.log
+
+#####REFINE THE INPUT STRUCTURE INTO THE CELL WE WANT AND GET PHASES
+#####
+####FIRST ADD RFREE COLUMN
+echo Prepare a dark mtz with R-free column >> ${jobname}.log
+cad HKLIN1 $darkin HKLIN2 $rfree_source HKLOUT dark_rfree.mtz <<eof_cad1 >> ${jobname}.log
+title combine light and dark Fs
+resolution overall ${lowres} ${highres}
+monitor BRIEF
+labin file 1 - 
+    E1 = $darkF -
+    E2 = $darkSIGF 
+labout file 1 -
+    E1 = F_dark - 
+    E2 = SIGF_dark
+ctypin file 1 -
+    E1 = F -
+    E2 = Q
+labin file 2 -
+    E1 = $RFREE 
+labout file 2 -
+    E1 = R-free-flags 
+ctypin file 2 -
+    E1 = I
+eof_cad1
+### Now refine, first do rigid body refine
+
+#########################REFMAC##################################
+
+echo 'Now refining rigid bodies, starting from': >> ${jobname}.log
+echo $pdb >> ${jobname}.log
+
+refmac5 XYZIN $pdb HKLIN dark_rfree.mtz HKLOUT ${jobname}_refmacrb.mtz XYZOUT ${jobname}_refmacrb.pdb LIBIN ${libin} LIBOUT ${libin}_refmacrb.lib <<EOF_refmacrb >> ${jobname}.log
+ make check NONE
+make -
+    hydrogen ALL -
+    hout NO -
+    peptide NO -
+    cispeptide YES -
+    ssbridge YES -
+    symmetry YES -
+    sugar YES -
+    connectivity NO -
+    link NO
+bfac SET 30.0
+CELL $a $b $c $alpha $beta $gamma 
+SYMM ${spg}
+refi -
+    type RIGID -
+    resi MLKF -
+    meth CGMAT -
+    bref over
+rigid ncycle 10
+scal -
+    type SIMP -
+    LSSC -
+    ANISO -
+    EXPE
+free 0
+solvent YES
+weight -
+    AUTO
+monitor MEDIUM -
+    torsion 10.0 -
+    distance 10.0 -
+    angle 10.0 -
+    plane 10.0 -
+    chiral 10.0 -
+    bfactor 10.0 -
+    bsphere 10.0 -
+    rbond 10.0 -
+    ncsr 10.0
+labin  FP=F_dark SIGFP=SIGF_dark FREE=R-free-flags
+labout  FC=FC FWT=FWT PHIC=PHIC PHWT=PHWT DELFWT=DELFWT PHDELWT=PHDELWT FOM=FOM
+PNAME FAP
+DNAME 
+RSIZE 80
+EXTERNAL WEIGHT SCALE 10.0
+EXTERNAL USE MAIN
+EXTERNAL DMAX 4.2
+END
+EOF_refmacrb
+
+
+#######################################
+
+#######################################
+# NOW GET THE LINK and CRYST1 RECORDS INTO THE RB RESULT AND RESTART
+#######################################
+rm -f start_restrained.pdb
+grep CRYST1 ${jobname}_refmacrb.pdb >start_restrained.pdb
+grep LINKR ${pdb} >> start_restrained.pdb
+grep ATOM ${jobname}_refmacrb.pdb >>start_restrained.pdb
+grep HETATM ${jobname}_refmacrb.pdb >>start_restrained.pdb
+
+echo now full refinement >> ${jobname}.log
+
+refmac5 XYZIN start_restrained.pdb HKLIN dark_rfree.mtz HKLOUT ${jobname}_refmac.mtz XYZOUT ${jobname}_refmac.pdb LIBIN ${libin} LIBOUT ${jobname}_refmac.lib <<EOF_refmac >> ${jobname}.log
+make check NONE
+make -
+    hydrogen ALL -
+    hout NO -
+    peptide NO -
+    cispeptide YES -
+    ssbridge YES -
+    symmetry YES -
+    sugar YES -
+    connectivity NO -
+    link NO
+CELL $a $b $c $alpha $beta $gamma 
+SYMM ${spg}
+refi -
+    type REST -
+    resi MLKF -
+    meth CGMAT -
+    bref ISOT
+ncyc 10
+scal -
+    type SIMP -
+    LSSC -
+    ANISO -
+    EXPE
+free 0
+solvent YES
+weight -
+    AUTO
+monitor MEDIUM -
+    torsion 10.0 -
+    distance 10.0 -
+    angle 10.0 -
+    plane 10.0 -
+    chiral 10.0 -
+    bfactor 10.0 -
+    bsphere 10.0 -
+    rbond 10.0 -
+    ncsr 10.0
+labin  FP=F_dark SIGFP=SIGF_dark FREE=R-free-flags
+labout  FC=FC FWT=FWT PHIC=PHIC PHWT=PHWT DELFWT=DELFWT PHDELWT=PHDELWT FOM=FOM
+PNAME project
+DNAME dataset
+RSIZE 80
+EXTERNAL WEIGHT SCALE 10.0
+EXTERNAL USE MAIN
+EXTERNAL DMAX 4.2
+END
+
+EOF_refmac
+
+
+#########################END REFMAC #################################
+
+
+
+###
+echo Combine mtz files of dark, light and phases >> ${jobname}.log
+
+cad HKLIN1 $darkin HKLIN2 $lightin HKLIN3 ${jobname}_refmac.mtz HKLOUT for_scaling.mtz <<eof_cad1 >> ${jobname}.log
+title combine light and dark Fs
+resolution overall ${lowres} ${highres}
+monitor BRIEF
+labin file 1 - 
+    E1 = $darkF -
+    E2 = $darkSIGF 
+labout file 1 -
+    E1 = F_dark - 
+    E2 = SIGF_dark
+ctypin file 1 -
+    E1 = F -
+    E2 = Q
+labin file 2 -
+    E1 = $lightF -
+    E2 = $lightSIGF
+labout file 2 -
+    E1 = F_light -
+    E2 = SIGF_light
+ctypin file 2 -
+    E1 = F -
+    E2 = Q
+labin file 3 -
+    E1 = PHIC -
+    E2 = R-free-flags
+labout file 3 -
+    E1 = PHI -
+    E2 = RFREE
+ctypin file 3 -
+    E1 = P -
+    E2 = I
+eof_cad1
+###
+
+echo 'Now scale them together' >> ${jobname}.log
+rm -f scaled.mtz
+scaleit HKLIN for_scaling.mtz HKLOUT scaled.mtz <<eof_scaleit >> ${jobname}.log
+title now scale light to dark
+NOWT
+converge NCYC 4
+converge ABS 0.001
+converge TOLR -7
+REFINE ANISOTROPIC -
+    WILSON
+LABIN FP = F_dark SIGFP = SIGF_dark  FPH1 = F_light SIGFPH1 = SIGF_light
+eof_scaleit
+
+echo now calculate extrapolated SFs >> ${jobname}.log
+
+### GET THE ATOM FOR MONITORING THE AMOUNT OF DARK STATE IN THE MAP...
+grep "$atom_string" ${jobname}_refmac.pdb >model.pdb
+
+python2.7 <<eof_anaconda >> ${jobname}.log
+import string
+import os
+import struct 
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
+
+def plateau(f,*p):
+    As,Amp,k=p
+    return As-Amp*np.exp(-1.0*f*k)
+
+def readmtzcolumns(mtzin, columnnames):
+    columnnamesstring=" "
+    for n in range(len(columnnames)):
+        columnnamesstring=columnnamesstring+columnnames[n]+" "
+    os.system("rm -f temporary.hkl")
+    infile=open('sftoolstmpin.com', 'w')
+    infile.write('#!/bin/bash \n')
+    infile.write('sftools <<eof >tmp.out\n')
+    infile.write('read '+mtzin+' \n')
+    infile.write('Y \n')
+    infile.write('sort resol down \n')
+    infile.write('calc col mult = M\n')
+    infile.write('calc col stol = STOL\n')
+    infile.write('calc col cent = C\n')
+    infile.write('write temporary.hkl col mult stol cent '+columnnamesstring+'\n')
+    
+    infile.write('format(3i4,'+str(int(3+len(columnnames)))+'f16.7)\n')
+    infile.write('DEGREES'+'\n')
+    infile.write('STOP'+'\n')
+    infile.write('eof'+'\n')
+    infile.close()
+    os.chmod('sftoolstmpin.com',int(0b111111000)) # rwxrwx---
+    os.system("./sftoolstmpin.com")
+    os.system("rm -f sftoolstmpin.com tmp.out")
+    infile=open("temporary.hkl","r")
+    linesin=infile.readlines()
+    infile.close()
+    h=[]
+    k=[]
+    l=[]
+    m=[]
+    stol=[]
+    cent=[]
+    values=np.empty([len(columnnames),len(linesin)])
+    v=0
+    for line in linesin:
+        elements=line.split()
+	h.append(int(elements[0]))
+	k.append(int(elements[1]))
+	l.append(int(elements[2]))
+	m.append(float(elements[3]))
+	stol.append(float(elements[4]))
+	cent.append(float(elements[5]))
+	for c in range(len(columnnames)):
+	    values[c,v]=float(elements[c+6])    
+	v=v+1
+    os.system("rm -f temporary.hkl sftoolstmpin.com tmp.out")
+    h=np.asarray(h)
+    k=np.asarray(k)
+    l=np.asarray(l)
+    m=np.asarray(m)
+    stol=np.asarray(stol)
+    cent=np.asarray(cent)
+    return h,k,l,m,stol,cent,values
+#######
+#
+#######
+def writemtzcolumns(mtzout,spgstring,a,b,c,alpha,beta,gamma,mtzoutcolumnnames,mtztypes, mtzoutcolumns):
+#mtzoutcolumns is a 2D numpy array with h,k,l in columns 0-2
+# and the data in the rest
+# phases should be in degrees
+# spgstring is a string with the space group name
+# a,b,c etcetera are floats containing the unit cell constants
+# mtzoutcolumnnames is a list of string with the desired column names in the output mtz
+# mtztype is a list of strings with the desired mtz column types (e.g: ['F','Q','P','I'] )
+    h=mtzoutcolumns[:,0]
+    k=mtzoutcolumns[:,1]
+    l=mtzoutcolumns[:,2]
+    
+    os.system("rm -f "+mtzout)
+    tmpout=open("out.tmp","w")
+    sh=np.shape(mtzoutcolumns) 
+    for n in range(len(h)):
+        hstring='%5i' % (h[n])
+        kstring='%5i' % (k[n])
+        lstring='%5i' % (l[n])
+        outstring=hstring+kstring+lstring
+        for m in range(3,sh[1]-1):
+	    part='%14.6f' % mtzoutcolumns[n,m]
+	    outstring=outstring+part
+	lastpart='%14.6f' % mtzoutcolumns[n,-1]   
+	outstring=outstring+lastpart+'\n'
+	tmpout.write(outstring)
+    tmpout.close()
+    
+    infile=open('sftoolstmpin.com', 'w')
+    infile.write('#!/bin/bash \n')
+    infile.write('sftools <<eof >tmp.out  2>/dev/null  \n')
+    infile.write('read out.tmp\n')
+    infile.write('fmt\n')
+    infile.write('1\n')
+    infile.write('degrees\n')
+    infile.write('end\n')
+    cellstring=str(a)+' '+str(b)+' '+str(c)+' '+str(alpha)+' '+str(beta)+' '+str(gamma)+'\n'
+    infile.write(cellstring)
+    infile.write(spgstring+'\n')
+    for n in range(len(mtztypes)):
+        t=mtztypes[n]
+	c=mtzoutcolumns[:,n+3]
+        infile.write(t+'\n')
+	
+	if t=='I' and np.array_equal(c, c.astype(bool)):
+	    infile.write('Y \n')
+	    #print 'FROM WRITEMTZCOLUMNS: I AM ASSUMING COLUMN',mtzoutcolumnnames[n],'IS AN XPLOR RFREE COLUMN'
+    infile.write('set labels \n')
+    for n in mtzoutcolumnnames:
+        infile.write(n+'\n')
+    infile.write('write '+mtzout+'\n')
+    infile.write('stop \n')
+    infile.write('eof \n')
+    infile.write(' \n')
+    infile.close()
+    os.chmod('sftoolstmpin.com',int(0b111111000)) # rwxrwx---
+    os.system("./sftoolstmpin.com 2>/dev/null")
+    os.system("rm -f sftoolstmpin.com tmp.out out.tmp")
+    return
+#######
+#
+#######
+#######################READCCP4MAP################
+#
+def readmrcmap(mapinname):
+    mapinfile=open(mapinname, "rb")
+    datain=mapinfile.read(208)
+
+    mapinfo=struct.unpack("10i 6f 3i 3f 3i 12f 15f",datain)
+    NC=mapinfo[0]
+    NR=mapinfo[1]
+    NS=mapinfo[2]
+    SIZE=[NC,NR,NS]
+    MODE=mapinfo[3]
+    NCSTART=mapinfo[4]
+    NRSTART=mapinfo[5]
+    NSSTART=mapinfo[6]
+    START=[NCSTART,NRSTART,NSSTART]
+    NX=mapinfo[7]
+    NY=mapinfo[8]
+    NZ=mapinfo[9]
+    INTERVALS=[NX,NY,NZ]
+    A=mapinfo[10]
+    B=mapinfo[11]
+    C=mapinfo[12]
+    ALPHA=mapinfo[13]
+    BETA=mapinfo[14]
+    GAMMA=mapinfo[15]
+    CELL=np.asarray([A,B,C,ALPHA,BETA,GAMMA])
+    MAPC=mapinfo[16]
+    MAPR=mapinfo[17]
+    MAPS=mapinfo[18]
+    ORDER=[MAPC,MAPR,MAPS]
+    #print 'Order of columns, rows, slices:',ORDER
+    AMIN=mapinfo[19]
+    AMAX=mapinfo[20]
+    AMEAN=mapinfo[21]
+    ISPG=mapinfo[22]
+    #print "ISPG=",ISPG
+    NSYMBT=mapinfo[23]
+    LSKFLG=mapinfo[24]
+    SKEW=[[mapinfo[25],mapinfo[26],mapinfo[27]],
+          [mapinfo[28],mapinfo[29],mapinfo[30]],
+          [mapinfo[31],mapinfo[32],mapinfo[33]]]
+    SKEW=np.asarray(SKEW)
+    SKEWTRN=mapinfo[34:37]
+    SKEWTRN=np.asarray(SKEWTRN)
+    FUTURE=mapinfo[37:52]
+
+    MRC_START=[mapinfo[49],mapinfo[50],mapinfo[51]]
+
+    datain=mapinfile.read(8) # read the word 'MAP ' and the 4-byte machine stamp
+
+    datain=mapinfile.read(8)
+
+    mapinfo=struct.unpack("fi",datain)
+    ARMS=mapinfo[0]
+    NLABL=mapinfo[1]
+
+
+    LABEL=mapinfile.read(800)
+    SYMOPS=mapinfile.read(NSYMBT)
+
+    NVOXELS=NC*NR*NS
+    formatstring=str(NVOXELS)+'f'
+    datain=mapinfile.read(NVOXELS*4)
+    maparray=struct.unpack(formatstring,datain)
+    mapinfile.close()
+    maparray=np.asarray(maparray)
+    maparray=np.reshape(maparray,(NS,NR,NC))
+    return SIZE,START,INTERVALS,CELL,ORDER,SKEW,SKEWTRN,SYMOPS,MRC_START,maparray
+
+####################################################################
+
+#######################skew########################
+# Calculate the skew or scale matrix from unit cell
+# parameters
+#
+def skew(a,b,c,alpha,beta,gamma):
+    pi=3.14159265359
+    alpha=pi*alpha/180.0
+    beta=pi*beta/180.0
+    gamma=pi*gamma/180.0
+
+    vsq=1.0 - (np.cos(alpha)*np.cos(alpha)) - (np.cos(beta)*np.cos(beta)) - (np.cos(gamma)*np.cos(gamma)) - (2*np.cos(alpha)*np.cos(beta)*np.cos(gamma))
+    v=np.sqrt(vsq) # volume of unit parallelepiped
+
+    
+    s=np.zeros((3,3))
+    s[0,0]=1.0/a
+    s[0,1]=-1.0*np.cos(gamma)/(a*np.sin(gamma))
+    s[0,2]=(np.cos(alpha)*np.cos(gamma)-np.cos(beta)) / (a*v*np.sin(gamma))
+    s[1,1]=1.0/(b*np.sin(gamma))
+    s[1,2]=(np.cos(beta)*np.cos(gamma)-np.cos(alpha)) / (b*v*np.sin(gamma))
+    s[2,2]=np.sin(gamma)/(c*v)
+    return s
+
+###################################################
+#######################WRITECCP4MAP_FULL####################
+#
+def writeccp4map_full(mapoutname,SIZE,START,INTERVALS,CELL,ORDER,SKEW,SKEWTRN,SYMOPS,maparray,ISPG=1):
+    HEADER=bytes()
+    
+    #print 'Now in writeccp4map function'
+    #print 'SIZE looks like:',SIZE
+    for value in SIZE:
+        HEADER += struct.pack('i',value)
+    #print 'Setting the mode to 2...'    
+    HEADER += struct.pack('i',int(2)) #SET THE MODE TO 2
+    #print 'I think START looks like:',START
+    for value in START:
+        HEADER += struct.pack('i',value)
+    #print 'I think INTERVALS looks like:',INTERVALS
+    for value in INTERVALS:
+        HEADER += struct.pack('i',value)
+    #print 'I think CELL looks like:',CELL
+
+    for value in CELL:
+        HEADER += struct.pack('f',value)
+    #print 'I think ORDER looks like:',ORDER
+    for value in ORDER:
+        HEADER += struct.pack('i',value)
+        
+    AMIN=np.min(maparray)
+    AMAX=np.max(maparray)
+    AMEAN=np.average(maparray)
+    #print 'Min,max,av:',AMIN,AMAX,AMEAN
+    HEADER += struct.pack('3f',AMIN,AMAX,AMEAN)
+    #print 'I think INTERVALS looks like:',INTERVALS
+    #for value in INTERVALS:
+    #    HEADER += struct.pack('i',value)
+    
+    #ISPG=4
+    print 'Space group number is set to',ISPG
+    NSYMBT=0
+    #LSKFLG=1 # IF SKEW IS TO BE WRITTEN OUT
+    LSKFLG=0 # IF NO SKEW E.G. FOR PYMOL
+    
+    HEADER += struct.pack('3i',ISPG,NSYMBT,LSKFLG)
+
+    #SKEW=np.reshape(SKEW,(9)) # IF SKEW IS TO BE WRITTEN OUT
+    SKEW=np.zeros((9)) # IF NO SKEW E.G. FOR PYMOL
+    SKEWTRN=np.zeros((3))
+    #print 'I think the SKEW looks like:',SKEW
+    for value in SKEW:
+        #print value
+        HEADER += struct.pack('f',value)
+
+    #print 'I think the SKEWTRN looks like:',SKEWTRN
+    for value in SKEWTRN:
+        HEADER += struct.pack('f',value)
+    #print 'adding 15 zeros...'
+    for n in range(15):
+        #print n,
+        HEADER += struct.pack('i',int(0))
+    #print ''
+    #print 'Adding the word MAP_'
+    HEADER += struct.pack('4c','M','A','P',' ')
+    HEADER += struct.pack('4c',chr(0x44), chr(0x41), chr(0x00), chr(0x00)) 
+    # little-endian machine stamp 'D','A',0,0
+    
+
+    ARMS=np.std(maparray)
+    HEADER += struct.pack('f',ARMS)
+    HEADER += struct.pack('i',3)
+    for n in range(800):
+        HEADER += struct.pack('c',' ')
+
+    mapoutfile=open(mapoutname, "wb")
+    mapoutfile.write(HEADER)
+    mapsize=np.shape(maparray)
+    #print 'The map size is',mapsize
+    maplength=(mapsize[0]*mapsize[1]*mapsize[2])
+    #print 'The map length is',maplength
+    maparray=np.reshape(maparray,(maplength))
+    for n in range(maplength):
+        voxelout=struct.pack('f',maparray[n])
+        mapoutfile.write(voxelout)
+    mapoutfile.close()
+##############################################################################
+
+
+a=$a
+b=$b
+c=$c
+alpha=$alpha
+beta=$beta
+gamma=$gamma
+print 'I am using the following cell',a,b,c,alpha,beta,gamma
+
+do_qweighting='${qweight}'
+
+
+#Read mtz file with scaled amplitudes of dark and light and phases
+h,k,l,m,stol,cent,values=readmtzcolumns('scaled.mtz',['F_dark','SIGF_dark', 'F_light', 'SIGF_light', 'PHI','RFREE']) 
+nref=len(h)
+resolution=1.0/(2.0*stol)
+Fdark=values[0]
+SIGFdark=values[1]
+Flight=values[2]
+SIGFlight=values[3]
+PHI=values[4]
+RFREE=values[5]
+
+#do some checks
+print 'Read ',nref, 'reflections after scaling'
+print 'The average phase angle in memory is',np.average(PHI)
+print 'Num, Max, Min, Av. Flight:',np.shape(Flight), np.max(Flight),np.min(Flight),np.average(Flight)
+print 'Num, Max, Min, Av. Fdark:',np.shape(Fdark), np.max(Fdark),np.min(Fdark),np.average(Fdark)
+print 'The resolution is between',np.max(resolution),'and',np.min(resolution),'A' 
+print cent
+
+#calculate differences
+Fdiff=Flight-Fdark
+SIGFdiff= np.sqrt( (SIGFlight**2.0) + (SIGFdark**2) )
+print 'Num, Max, Min, Av. delF:',np.shape(Fdiff), np.max(Fdiff),np.min(Fdiff),np.average(Fdiff)
+
+###############################QWEIGHT?###########################################################
+if do_qweighting.upper()=='TRUE':
+    nbins=20
+    print 'I WILL PERFORM Q-WEIGHTING!'
+
+    N=np.ones(np.shape(cent))
+    N[cent!=0]=2.0
+
+    print 'I will use',nbins,'for resolution-dependent calculations.'
+    nrefinbin=int(len(h)/nbins)
+    print 'There will be',nrefinbin,'reflections per bin'
+    binindices=np.zeros((len(h)))
+    start=0
+    end=nrefinbin
+    for n in range(nbins-1):
+        binindices[start:end]=n
+        start=start+nrefinbin
+        end=end+nrefinbin
+    binindices[start:]=n+1
+
+
+    SIGMADSQ=np.zeros((len(h)))
+
+
+    #calculate average difference estimates per bin
+
+    sigmadsq=np.zeros((nbins))
+    binres=np.zeros((nbins))
+    DECONV=[]
+    NODECONV=[]
+    for n in range(nbins): 
+        binres[n]=np.average(resolution[binindices==n])
+        binFP=Fdark[binindices==n]
+        binFPH=Flight[binindices==n]
+        binN=N[binindices==n]
+        binMULT=m[binindices==n]
+    
+
+        binSIGFP=SIGFdark[binindices==n]
+        binSIGFPH=SIGFlight[binindices==n]
+
+        diffsquare=np.square(np.subtract(binFPH,binFP))
+        prod=np.multiply(binN,diffsquare)
+        qout=np.divide(prod,binMULT)
+        nodeconv=np.average(qout)
+        #nodeconv=np.median(qout)
+    
+        NODECONV.append(nodeconv)
+
+        sigmasum=np.average(np.square(binSIGFP)+np.square(binSIGFPH))
+        #sigmasum=np.median(np.square(binSIGFP)+np.square(binSIGFPH))
+
+        diffsquare=np.subtract(diffsquare,sigmasum)
+        prod=np.multiply(binN,diffsquare)
+        qout=np.divide(prod,binMULT)
+        deconv=np.average(qout)
+        #deconv=np.median(qout)
+        DECONV.append(deconv)
+
+
+        print "Bin average res, deconv. estimate, non-deconv estimate:",np.average(binres[n]),deconv,nodeconv
+    
+
+        if deconv>=(nodeconv/2.0):
+            sigmadsq[n]=deconv
+            print 'deconvoluted estimate of difference is big enough...'
+        else:
+            sigmadsq[n]=(nodeconv/2.0)
+            print 'deconvoluted estimage of differences too small...I have to correct...'
+
+        SIGMADSQ[binindices==n] = sigmadsq[n]
+    ax=plt.gca()                  
+    ax.semilogy(binres,sigmadsq)
+    ax.invert_xaxis()
+    plt.xlabel(r'Resolution per bin [Angstrom]')
+    plt.ylabel('<Estimate of Differences on F>')
+    plt.savefig('Diffs_${jobname}.png',dpi=300)
+    plt.close()
+
+
+    #calculate q-weight factors
+    q=np.zeros((len(h)))
+    for n in range(len(h)):
+        enumerator=m[n]*SIGMADSQ[n]/2.0
+        if cent[n]==0:
+            enumerator=enumerator*2.0
+        divisor=(SIGFdark[n]*SIGFdark[n]) + (SIGFlight[n]*SIGFlight[n]) + enumerator
+        q[n]=enumerator/divisor
+        Fdiff[n]=Fdiff[n]*q[n]
+
+    ax=plt.gca()                  
+    ax.scatter(resolution,q)
+    ax.invert_xaxis()
+    plt.xlabel(r'Resolution [Angstrom]')
+    plt.ylabel('q')
+    plt.savefig('Qs_${jobname}.png',dpi=300)
+    plt.close()
+    print 'The median value of q is',np.median(q)
+    print 'The average value of q is',np.average(q)
+    Fdiff=Fdiff/np.average(q)
+
+###############################CONTINUE AS IS#####################################################
+
+
+
+
+fs=[]
+mapvals=[]
+
+
+#set occupancy
+for f in np.arange(${occ_start},${occ_end}+${occ_step},${occ_step}):
+    print 'SETTING f TO',f
+
+    #extrapolate SDs
+    Fext=(Fdiff/f) + Fdark
+    SIGFext= np.sqrt( ((SIGFdiff/f)**2.0) + (SIGFdark**2) )
+
+    print 'Num, Max, Min, Av. Fext:',np.shape(Fext), np.max(Fext),np.min(Fext),np.average(Fext)
+
+
+    Columns=np.zeros((nref, 7))
+    Columns[:,0]=h
+    Columns[:,1]=k
+    Columns[:,2]=l
+    Columns[:,3]=Fext
+    Columns[:,4]=SIGFext
+    Columns[:,5]=PHI
+    Columns[:,6]=RFREE
+
+    fstring='%5.3f' % f
+
+    outfilename='extrapolated_${jobname}_'+fstring+'.mtz'
+    if do_qweighting.upper()=='TRUE':        
+        outfilename='Qweighted_extrapolated_${jobname}_'+fstring+'.mtz'
+
+    writemtzcolumns(outfilename,'${spg}',a, b, c, alpha, beta, gamma,['FWT','SIGFP','PHWT','RFREE'],['F','Q','P','I'] ,Columns)
+
+    print 'wrote '+outfilename+'...'
+  
+    Columns=np.zeros((nref,5))
+    Columns[:,0]=h
+    Columns[:,1]=k
+    Columns[:,2]=l
+    Columns[:,3]=Fext
+    Columns[:,4]=PHI
+    writemtzcolumns('test.mtz','${spg}',a, b, c, alpha, beta, gamma,['F-model','PHIF-model'],['F','P'] ,Columns)
+    cmd='phenix.map_value_at_point test.mtz model.pdb label=\"F-model\" | grep \"Map value:\" >mapval.dat'
+    os.system(cmd)
+    os.system('rm -f test.mtz')
+    infile=open('mapval.dat','r')
+    inline=infile.read()
+    infile.close()
+    os.system('rm -f mapval.dat')
+    elements=inline.split()
+    map_value=float(elements[-1])
+    print 'Map value is',map_value
+    fs.append(f)
+    mapvals.append(map_value)
+
+Columns=np.zeros((nref, 9))
+Columns[:,0]=h
+Columns[:,1]=k
+Columns[:,2]=l
+Columns[:,3]=Fdiff
+Columns[:,4]=SIGFdiff
+Columns[:,5]=PHI
+Columns[:,6]=RFREE
+Columns[:,7]=Fdiff
+Columns[:,8]=PHI
+
+outfilename='difference_${jobname}.mtz'
+if do_qweighting.upper()=='TRUE':        
+    outfilename='Qweighted_difference_${jobname}.mtz'
+
+writemtzcolumns(outfilename,'${spg}',a, b, c, alpha, beta, gamma,['Fdiff','SIGFdiff','PHI','RFREE','DELFWT','PHDELWT'],['F','Q','P','I','F','P'] ,Columns)
+
+print 'wrote '+outfilename+'...'
+
+
+for n in range(1,len(fs)):
+    if mapvals[n]>0.0:
+        best_occ=fs[n-1]
+        break
+
+
+
+#print 'The predicted occupancy is',best_occ
+#plt.scatter(fs,mapvals)
+#plt.grid()
+#plt.xlabel('occupancy')
+#plt.ylabel('map value at selected position')
+#plt.close()
+
+p0=[mapvals[-1],10,10]
+coeffs,var_matrix=curve_fit(plateau,np.asarray(fs),np.asarray(mapvals),p0=p0)
+print(coeffs)
+
+f_fit=np.arange(0.9*np.min(fs),1.1*np.max(fs),(np.max(fs)-np.min(fs))/1000.0)
+
+p_fit=np.asarray([float(coeffs[0]),float(coeffs[1]),float(coeffs[2])])
+
+A0=coeffs[0]
+A=coeffs[1]
+k_fit=coeffs[2]
+f_opt=-np.log(A0/A)/k_fit
+print(np.round(f_opt,3))               
+
+plt.scatter(fs,mapvals)
+plt.plot(f_fit,plateau(f_fit,*p_fit))
+plt.plot([f_opt,f_opt],[mapvals[0],mapvals[-1]],'--')
+plt.grid()
+plt.xlabel('occupancy')
+plt.ylabel('map value at selected position')
+title="Best Estimate of Occupancy="+str(np.round(f_opt,3))
+plt.title(title)
+plt.savefig('Occ_${jobname}.png',dpi=300)
+plt.close()
+
+f_opt=float("${preset_occ}")
+##########################################
+print 'SETTING f TO BEST VALUE',np.round(f_opt,3)
+f=f_opt
+print "My f value for the final extrapolated SFs is",f
+#extrapolate SDs
+Fext=(Fdiff/f) + Fdark
+SIGFext= np.sqrt( ((SIGFdiff/f)**2.0) + (SIGFdark**2) )
+
+print 'Num, Max, Min, Av. Fext:',np.shape(Fext), np.max(Fext),np.min(Fext),np.average(Fext)
+
+
+Columns=np.zeros((nref, 9))
+Columns[:,0]=h
+Columns[:,1]=k
+Columns[:,2]=l
+Columns[:,3]=Fext
+Columns[:,4]=SIGFext
+Columns[:,5]=PHI
+Columns[:,6]=RFREE
+Columns[:,7]=Fext
+Columns[:,8]=PHI
+
+fstring='%5.3f' % f
+
+outfilename='extrapolated_${jobname}_'+fstring+'autoocc.mtz'
+if do_qweighting.upper()=='TRUE':        
+    outfilename='Qweighted_extrapolated_${jobname}_'+fstring+'autoocc.mtz'
+
+writemtzcolumns(outfilename,'${spg}',a, b, c, alpha, beta, gamma,['Fext','SIGFext','PHI','RFREE','FWT','PHWT'],['F','Q','P','I','F','P'] ,Columns)
+
+print 'wrote '+outfilename+'...'
+#######################NOW SHARPEN
+Bsharp=float("${Bsharpen}")
+Fsharpened=Fext*np.exp(0.25*Bsharp/np.square(resolution))
+Columns=np.zeros((nref, 9))
+Columns[:,0]=h
+Columns[:,1]=k
+Columns[:,2]=l
+Columns[:,3]=Fsharpened
+Columns[:,4]=SIGFext
+Columns[:,5]=PHI
+Columns[:,6]=RFREE
+Columns[:,7]=Fsharpened
+Columns[:,8]=PHI
+
+fstring='%5.3f' % f
+
+outfilename='sharpened_extrapolated_${jobname}_'+fstring+'autoocc.mtz'
+if do_qweighting.upper()=='TRUE':        
+    outfilename='sharpened_Qweighted_extrapolated_${jobname}_'+fstring+'autoocc.mtz'
+
+writemtzcolumns(outfilename,'${spg}',a, b, c, alpha, beta, gamma,['Fext_sharp','SIGFext_sharp','PHI','RFREE','FWT','PHWT'],['F','Q','P','I','F','P'] ,Columns)
+
+print 'wrote '+outfilename+'...'
+
+
+#######################output map coefficients for Drenth correction
+Columns=np.zeros((nref, 5))
+Columns[:,0]=h
+Columns[:,1]=k
+Columns[:,2]=l
+Columns[:,3]=Fdark
+Columns[:,4]=PHI
+writemtzcolumns('darkcoeff.mtz','${spg}',a, b, c, alpha, beta, gamma,['FWT','PHIWT'],['F','P'] ,Columns)
+
+Columns=np.zeros((nref, 5))
+Columns[:,0]=h
+Columns[:,1]=k
+Columns[:,2]=l
+Columns[:,3]=Fext
+Columns[:,4]=PHI
+writemtzcolumns('extcoeff.mtz','${spg}',a, b, c, alpha, beta, gamma,['FWT','PHIWT'],['F','P'] ,Columns)
+
+######################## make the maps in real space
+os.system('phenix.mtz2map darkcoeff.mtz')
+os.system('phenix.mtz2map extcoeff.mtz')
+
+####################### calculate corrected map
+SIZE,START,INTERVALS,CELL,ORDER,SKEW,SKEWTRN,SYMOPS,MRC_START,maparray_extrapolated=readmrcmap('extcoeff_1.ccp4')
+SIZE,START,INTERVALS,CELL,ORDER,SKEW,SKEWTRN,SYMOPS,MRC_START,maparray_dark=readmrcmap('darkcoeff_1.ccp4')
+diffmap=maparray_extrapolated-maparray_dark
+newmap=maparray_dark+(2.0*diffmap)
+newmap=newmap/np.std(newmap)
+writeccp4map_full('Drenth_corrected_${jobname}_map.ccp4',SIZE,START,INTERVALS,CELL,ORDER,SKEW,SKEWTRN,SYMOPS,newmap,ISPG=4)
+
+##################### prepare for DM
+Columns=np.zeros((nref, 6))
+Columns[:,0]=h
+Columns[:,1]=k
+Columns[:,2]=l
+Columns[:,3]=Fext
+Columns[:,4]=SIGFext
+Columns[:,5]=PHI
+writemtzcolumns('extmap.mtz','${spg}',a, b, c, alpha, beta, gamma,['Fext','SIGFext','PHI'],['F','Q','P'] ,Columns)
+
+eof_anaconda
+
+rm -f extcoeff_1.ccp4 darkcoeff_1.ccp4 extcoeff.mtz darkcoeff.mtz
+
+############### Now do solvent flattening
+
+cad HKLIN1 extmap.mtz HKLIN2 ${jobname}_refmac.mtz HKLOUT for_dm.mtz <<eof_caddm >> ${jobname}.log
+title combine stuff for DM
+monitor BRIEF
+labin file 1 -
+    E1 = Fext -
+    E2 = SIGFext -
+    E3 = PHI
+labout file 1 -
+    E1 = Fext -
+    E2 = SIGFext -
+    E3 = PHI
+ctypin file 1 -
+    E1 = F -
+    E2 = Q -
+    E3 = P
+labin file 2 -
+    E1 = FOM
+labout file 2 -
+    E1 = FOM
+ctypin file 2 -
+    E1 = W
+eof_caddm
+
+dm HKLIN for_dm.mtz HKLOUT Fext_DM_${jobname}.mtz SOLOUT Fext_DM_${jobname}.msk <<eof_dm >> ${jobname}.log
+ mode -
+    SOLV -
+    HIST
+combine PERT
+scheme ALL
+ncycles -
+    100
+solc ${solvent_content}
+ncsmask
+LABIN FP = Fext SIGFP = SIGFext PHIO = PHI FOMO = FOM
+LABOUT  FDM=FDM PHIDM=PHIDM FOMDM=FOMDM
+RSIZE 80
+END
+eof_dm
+
+
+#cp ${pdb} for_refine.pdb 
+#prep phenix-old
+
+#phenix.mtz2map makemap.in
+#mv mapout_1.ccp4 for_refine.ccp4
+#phenix.real_space_refine rsr.in ${libin}
+
+rm -f for_scaling.mtz out.tmp tmp.out temp.log start_restrained.pdb model.pdb cells.sh dark_rfree.mtz mtzdump.log for_dm.mtz extmap.mtz
+rm -Rf SOSHI_${jobname}
+mv scaled.mtz scaled_${jobname}.mtz
+
+mkdir SOSHI_${jobname}
+mv *${jobname}* SOSHI_${jobname}/
+
+
+
