@@ -10,7 +10,7 @@ THIS SOFTWARE IS DISTRIBUTED UNDER THE GNU GPLv3 LICENSE
 -python2.7 with numpy, matplotlib, scipy 
 
 2. INSTALLATION INSTRUCTIONS
-Copy all files to a stand-alone directory
+Copy all files to a stand-alone directory. Typical install time: seconds
 
 3. and 4. DEMO ON ACTUAL DATA
 The directory includes the original data associated with the paper. 
