@@ -52,3 +52,6 @@ To change settings, edit the "CHANGE PARAMETERS HERE" section at the top of
 the script. Setting qweight to FALSE wil switch off the Q-weighting, 
 changing the jobname parameter will change the filename root for the output
 files. preset_occ controls the final occupancy used for extrapolation.
+
+To plot distance displacement matrices, edit the motions_CA_plot.py script to 
+use the desired pdb files and run.
