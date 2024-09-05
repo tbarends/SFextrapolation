@@ -2,11 +2,11 @@
 # Plot distance difference matrix
 ##################################################################
 ##########################SETTINGS################################
-moleculeA='C:/Users/tbarend/Documents/My Projects/SOSHI/phyA_dark_runs11to22_hits_reproc1_partialator_2m_uab_2p2A-unique_refmac202...1031_2.pdb'
-moleculeB='C:/Users/tbarend/Documents/My Projects/SOSHI/Bmoleculerebuilt.pdb'
+moleculeA='C:/Users/brain/Downloads/Re__phyA_XFEL_update/DDM/4511_Pr_filtered.pdb'
+moleculeB='C:/Users/brain/Downloads/Re__phyA_XFEL_update/DDM/4511_Pfr_filtered.pdb'
 chainA='B'
 chainB='B'
-maxdifference=0.4
+maxdifference=1.0
 
 # The program will plot a distance difference matrix for Calpha atoms
 # (Molecule B) - (Molecule A)
@@ -75,6 +75,7 @@ def readpdb(infile,chain):
     return C,fullnames
 
 # Calculate a distance matrix
+# This is the part where the distance between two 3D points are being calculated.
 def distmat(C):
     x=np.power(diffmat(C[:,0]),2)
     y=np.power(diffmat(C[:,1]),2)
@@ -83,6 +84,7 @@ def distmat(C):
     return D
 
 # calculate a difference matrix
+# I think distance is being calculated and output as d
 def diffmat(r):
     d=np.zeros((len(r),len(r)))
     for n in range(len(r)):
@@ -90,7 +92,8 @@ def diffmat(r):
             d[n,m]=r[n]-r[m]
     return d
 
-# extract unit cell from pdb file               
+# extract unit cell from pdb file
+# a function is defined, but I don't think it's called anywhere
 def unitcell(pdbfile):
     infile=open(pdbfile,'r')
     for line in infile:
@@ -128,7 +131,7 @@ for p in range(len(pdbs)):
     #print 'I read',len(names2),'atoms...'
     #print names1==names2
     label=labels[p]
-    plotout='C:/Users/tbarend/Desktop/'+label+'.png'
+    plotout='C:/Users/brain/Desktop/'+label+'.png'
     #print np.shape(pdb1),np.shape(pdb2)
 
     r=distmat(pdb2)-distmat(pdb1)
